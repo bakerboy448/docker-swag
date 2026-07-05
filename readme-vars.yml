@@ -219,6 +219,7 @@ init_diagram: |
   "swag:latest" <- Base Images
 # changelog
 changelogs:
+  - {date: "05.07.26:", desc: "Fix certbot init bugs: sanitize cli.ini before plugin checks, validate DNSPLUGIN/PROPAGATION, fix ZeroSSL EAB extraction, improve renewal and auto-reload error handling."}
   - {date: "01.06.26:", desc: "Remove obsolete old cert check logic."}
   - {date: "23.01.26:", desc: "Reorder init to fix proxy conf version checks."}
   - {date: "21.12.25:", desc: "Add support for hetzner-cloud dns validation."}

@@ -19,9 +19,26 @@ STAGING=${STAGING}\\n"
 # Sanitize variables
 SANED_VARS=(DNSPLUGIN EMAIL EXTRA_DOMAINS ONLY_SUBDOMAINS STAGING SUBDOMAINS URL VALIDATION CERTPROVIDER)
 for i in "${SANED_VARS[@]}"; do
-    export echo "${i}"="${!i//\"/}"
-    export echo "${i}"="$(echo "${!i}" | tr '[:upper:]' '[:lower:]')"
+    export "${i}"="${!i//\"/}"
+    export "${i}"="$(echo "${!i}" | tr '[:upper:]' '[:lower:]')"
 done
+EMAIL="${EMAIL#"${EMAIL%%[![:space:]]*}"}"
+EMAIL="${EMAIL%"${EMAIL##*[![:space:]]}"}"
+export EMAIL
+PROPAGATION="${PROPAGATION//\"/}"
+PROPAGATION="${PROPAGATION%%#*}"
+PROPAGATION="${PROPAGATION// /}"
+if [[ -n "${PROPAGATION}" ]] && ! [[ "${PROPAGATION}" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: PROPAGATION must be a positive integer (seconds), got '${PROPAGATION}'"
+    sleep infinity
+fi
+export PROPAGATION
+
+# ensure config files exist and sanitize cli.ini before certbot plugin checks
+touch /config/etc/letsencrypt/cli.ini
+grep -qF 'agree-tos' /config/etc/letsencrypt/cli.ini || echo 'agree-tos=true' >>/config/etc/letsencrypt/cli.ini
+sed -i '/dns--credentials/d' /config/etc/letsencrypt/cli.ini
+sed -i '/-propagation-seconds=[^0-9]/d' /config/etc/letsencrypt/cli.ini
 
 # Check for and install requested DNS plugins
 if grep -q "universal-package-install" <<< "${DOCKER_MODS}" && grep -q "certbot-dns" <<< "${INSTALL_PIP_PACKAGES}"; then
@@ -31,7 +48,16 @@ if grep -q "universal-package-install" <<< "${DOCKER_MODS}" && grep -q "certbot-
 fi
 
 # check to make sure DNSPLUGIN is selected if dns validation is used
-CERTBOT_DNS_AUTHENTICATORS=$(certbot plugins --authenticators 2>/dev/null | sed -e 's/^Entry point: EntryPoint(name='\''cpanel'\''/Entry point: EntryPoint(name='\''dns-cpanel'\''/' -e '/EntryPoint(name='\''dns-/!d' -e 's/^Entry point: EntryPoint(name='\''dns-\([^ ]*\)'\'',/\1/' | sort)
+if [[ "${VALIDATION}" = "dns" ]] && [[ -z "${DNSPLUGIN}" ]]; then
+    echo "ERROR: VALIDATION=dns requires DNSPLUGIN to be set."
+    sleep infinity
+fi
+CERTBOT_DNS_AUTHENTICATORS=$(certbot plugins --authenticators --config-dir /config/etc/letsencrypt --logs-dir /config/log/letsencrypt --work-dir /tmp/letsencrypt 2>&1 | sed -e 's/^Entry point: EntryPoint(name='\''cpanel'\''/Entry point: EntryPoint(name='\''dns-cpanel'\''/' -e '/EntryPoint(name='\''dns-/!d' -e 's/^Entry point: EntryPoint(name='\''dns-\([^ ]*\)'\'',/\1/' | sort)
+if [[ "${VALIDATION}" = "dns" ]] && [[ -z "${CERTBOT_DNS_AUTHENTICATORS}" ]]; then
+    echo "ERROR: certbot failed to enumerate DNS plugins. Check /config/etc/letsencrypt/cli.ini for invalid options."
+    certbot plugins --authenticators --config-dir /config/etc/letsencrypt --logs-dir /config/log/letsencrypt --work-dir /tmp/letsencrypt
+    sleep infinity
+fi
 if [[ "${VALIDATION}" = "dns" ]] && ! echo "${CERTBOT_DNS_AUTHENTICATORS}" | grep -q "${DNSPLUGIN}"; then
     echo "Please set the DNSPLUGIN variable to one of the following:"
     echo "${CERTBOT_DNS_AUTHENTICATORS}"
@@ -52,12 +78,7 @@ function set_ini_value() {
 }
 
 # ensure config files exist and has at least one value set (set_ini_value does not work on empty files)
-touch /config/etc/letsencrypt/cli.ini
 lsiown abc:abc /config/etc/letsencrypt/cli.ini
-grep -qF 'agree-tos' /config/etc/letsencrypt/cli.ini || echo 'agree-tos=true' >>/config/etc/letsencrypt/cli.ini
-
-# Check for broken dns credentials value in cli.ini and remove
-sed -i '/dns--credentials/d' /config/etc/letsencrypt/cli.ini
 
 # Disable Certbot's built in log rotation
 set_ini_value "max-log-backups" "0" /config/etc/letsencrypt/cli.ini
@@ -280,6 +301,7 @@ else
 fi
 
 # setting the validation method to use
+sed -i '/^dns-.*-credentials/d; /^dns-.*-propagation-seconds/d; /^dns--credentials/d; /^cpanel-credentials/d; /^cpanel-propagation-seconds/d; /^authenticator =/d; /^preferred-challenges =/d' /config/etc/letsencrypt/cli.ini
 if [[ "${VALIDATION}" = "dns" ]]; then
     set_ini_value "preferred-challenges" "dns" /config/etc/letsencrypt/cli.ini
     set_ini_value "authenticator" "dns-${DNSPLUGIN}" /config/etc/letsencrypt/cli.ini
@@ -323,10 +345,10 @@ fi
 if [[ ! -f "/config/keys/letsencrypt/fullchain.pem" ]]; then
     if [[ "${CERTPROVIDER}" = "zerossl" ]] && [[ -n "${EMAIL}" ]]; then
         echo "Retrieving EAB from ZeroSSL"
-        EAB_CREDS=$(curl -s https://api.zerossl.com/acme/eab-credentials-email --data "email=${EMAIL}")
-        ZEROSSL_EAB_KID=$(echo "${EAB_CREDS}" | jq .eab_kid)
-        ZEROSSL_EAB_HMAC_KEY=$(echo "${EAB_CREDS}" | jq .eab_hmac_key)
-        if [[ -z "${ZEROSSL_EAB_KID}" ]] || [[ -z "${ZEROSSL_EAB_HMAC_KEY}" ]]; then
+        EAB_CREDS=$(curl -sf https://api.zerossl.com/acme/eab-credentials-email --data-urlencode "email=${EMAIL}") || EAB_CREDS=""
+        ZEROSSL_EAB_KID=$(echo "${EAB_CREDS}" | jq -r '.eab_kid // empty')
+        ZEROSSL_EAB_HMAC_KEY=$(echo "${EAB_CREDS}" | jq -r '.eab_hmac_key // empty')
+        if [[ -z "${ZEROSSL_EAB_KID}" ]] || [[ -z "${ZEROSSL_EAB_HMAC_KEY}" ]] || [[ "${ZEROSSL_EAB_KID}" = "null" ]] || [[ "${ZEROSSL_EAB_HMAC_KEY}" = "null" ]]; then
             echo "Unable to retrieve EAB credentials from ZeroSSL. Check the outgoing connections to api.zerossl.com and dns. Sleeping."
             sleep infinity
         fi

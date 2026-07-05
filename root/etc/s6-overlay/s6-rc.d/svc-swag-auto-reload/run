@@ -14,16 +14,17 @@ if [[ ${SWAG_AUTORELOAD,,} == "true" ]]; then
                 echo "${i}"
                 ACTIVE_WATCH+=("${i}")
             fi
-            done
+        done
 
-            function wait_for_changes {
-            inotifywait -rq \
+        while true; do
+            if ! inotifywait -rq \
                 --event modify,move,create,delete \
                 --includei '\.conf$' \
-                "${ACTIVE_WATCH[@]}"
-            }
-
-            while wait_for_changes; do
+                "${ACTIVE_WATCH[@]}"; then
+                echo "WARN: inotifywait failed (exit $?), retrying in 30s..."
+                sleep 30
+                continue
+            fi
             NGINX_CONF=()
             if ! grep -q "/config/nginx/nginx.conf" /etc/nginx/nginx.conf; then
                 NGINX_CONF=("-c" "/config/nginx/nginx.conf")
